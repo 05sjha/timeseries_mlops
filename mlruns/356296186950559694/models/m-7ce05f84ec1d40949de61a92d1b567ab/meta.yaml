@@ -1,0 +1,10 @@
+artifact_location: file:C:/Users/SJ/OneDrive/Desktop/demand_forecast/demand_forecast_practice/mlruns/356296186950559694/models/m-7ce05f84ec1d40949de61a92d1b567ab/artifacts
+creation_timestamp: 1780152087707
+experiment_id: '356296186950559694'
+last_updated_timestamp: 1780152094298
+model_id: m-7ce05f84ec1d40949de61a92d1b567ab
+model_type: null
+name: model
+source_run_id: 2ef810fa47af43ec98b2b231a625a2b0
+status: 2
+status_message: null

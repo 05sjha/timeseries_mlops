@@ -1,0 +1,55 @@
+# configs/pipeline_config.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Central configuration for the demand forecasting MLOps pipeline.
+# ALL magic numbers live here — never hardcode in Python modules.
+# This file is version-controlled. Secret values go in environment variables.
+# ─────────────────────────────────────────────────────────────────────────────
+
+project:
+  name: "demand-forecast"
+  version: "0.1.0"
+  gcp_project: "${GCP_PROJECT_ID}"        # injected from env at runtime
+  gcp_region: "us-central1"
+  gcs_bucket: "${GCS_BUCKET}"
+
+data:
+  raw_data_path: "data/raw/sales.csv"
+  processed_data_path: "data/processed/"
+  target_column: "units_sold"
+  date_column: "week_start"
+  product_column: "product_id"
+  # Feature engineering windows (weeks)
+  lag_windows: [1, 2, 4, 8, 12, 52]
+  rolling_windows: [4, 8, 13]             # 4=monthly, 13=quarterly
+  test_weeks: 13                          # hold out last 13 weeks for eval
+  validation_weeks: 13
+
+training:
+  experiment_name: "demand-forecast-xgb"
+  model_type: "xgboost"
+  hyperparameters:
+    n_estimators: 500
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+    early_stopping_rounds: 50
+  # Metric used for model comparison and promotion decisions
+  primary_metric: "mae"
+  promotion_threshold: 0.05              # new model must beat current by 5%
+
+serving:
+  endpoint_name: "demand-forecast-endpoint"
+  machine_type: "n1-standard-2"
+  min_replicas: 1
+  max_replicas: 5
+  # Canary: route 10% traffic to new model before full rollout
+  canary_traffic_percent: 10
+  canary_bake_hours: 24
+
+monitoring:
+  # Drift detection — alert if feature distribution shifts beyond threshold
+  drift_threshold: 0.15                  # Jensen-Shannon divergence
+  mae_degradation_threshold: 0.20        # alert if MAE degrades by 20%
+  monitoring_schedule: "0 6 * * 1"      # every Monday 6am UTC
+  alert_email: "${ALERT_EMAIL}"

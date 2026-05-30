@@ -1,0 +1,9 @@
+{
+  "train_rows": 780,
+  "val_rows": 130,
+  "test_rows": 130,
+  "train_period": "2022-01-03 \u2192 2023-06-26",
+  "val_period": "2023-07-03 \u2192 2023-09-25",
+  "test_period": "2023-10-02 \u2192 2023-12-25",
+  "n_products": 10
+}
