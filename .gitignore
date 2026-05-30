@@ -1,33 +1,25 @@
 # virtual environment
 .venv/
-
 # MLflow experiment data
 mlruns/
-
 # Python cache
 __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
-
 # coverage reports
 .coverage
 htmlcov/
-
 # build artifacts
 *.egg-info/
 dist/
 build/
-
 # environment variables (never commit secrets)
 .env
-
 # VS Code
 .vscode/
-
 # Jupyter notebooks checkpoints
 .ipynb_checkpoints/
-
 # OS files
 .DS_Store
 Thumbs.db

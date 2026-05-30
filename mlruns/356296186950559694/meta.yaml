@@ -1,8 +1,0 @@
-artifact_location: file:C:/Users/SJ/OneDrive/Desktop/demand_forecast/demand_forecast_practice/mlruns/356296186950559694
-creation_time: 1780152086202
-experiment_id: '356296186950559694'
-last_update_time: 1780152086202
-lifecycle_stage: active
-name: demand-forecast-local
-trace_location: null
-workspace: default
