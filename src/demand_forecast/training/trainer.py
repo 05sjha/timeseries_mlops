@@ -189,7 +189,7 @@ class DemandForecaster:
 
             mlflow.xgboost.log_model(
                 self.model,
-                artifact_path="model",
+                name="model",
                 signature=signature,
                 registered_model_name=f"{self.experiment_name}-model",
             )

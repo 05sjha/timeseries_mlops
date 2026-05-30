@@ -104,19 +104,21 @@ model_state = ModelState()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle handler (FastAPI's modern approach)."""
-    # ── STARTUP ───────────────────────────────────────────────────────────────
-    model_uri = os.environ.get("MODEL_URI", "models:/demand-forecast-local-model/1")
-    logger.info(f"Loading model from: {model_uri}")
+    import xgboost as xgb
 
-    try:
+    model_uri = os.environ.get("MODEL_URI", "")
+    model_path = os.environ.get("MODEL_PATH_UBJ", "")
+
+    if model_path:
+        # direct file path to model.ubj
+        model_state.model = xgb.XGBRegressor()
+        model_state.model.load_model(model_path)
+        model_state.model_version = "local"
+        model_state.is_ready = True
+    elif model_uri:
         model_state.model = mlflow.xgboost.load_model(model_uri)
         model_state.model_version = model_uri.split("/")[-1]
         model_state.is_ready = True
-        logger.info(f"Model loaded successfully. Version: {model_state.model_version}")
-    except Exception as e:
-        # In production, failure to load = container fails health check = restart
-        logger.error(f"Failed to load model: {e}")
-        # Don't crash — allow health endpoint to report unhealthy state
 
     yield  # Application runs here
 

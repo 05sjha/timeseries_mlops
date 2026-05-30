@@ -48,7 +48,7 @@ RUN pip install --no-cache-dir --prefix=/install \
 COPY src/ src/
 
 # install the local package
-RUN pip install --no-cache-dir --prefix=/install --no-deps -e .
+# RUN pip install --no-cache-dir --prefix=/install --no-deps -e .
 
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────
@@ -68,6 +68,9 @@ COPY --from=builder /install /usr/local
 
 # Copy application source
 COPY --from=builder /build/src ./src
+
+# add this line below the src copy
+ENV PYTHONPATH=/app/src
 
 # Copy config
 COPY configs/ configs/
