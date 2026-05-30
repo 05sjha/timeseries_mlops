@@ -18,6 +18,7 @@ dependencies = [
     "pydantic>=2.0",        # data validation — critical for serving
     "fastapi>=0.110",       # model serving API
     "uvicorn>=0.29",        # ASGI server
+    "pyyaml>=6.0",
     "google-cloud-storage>=2.14",
     "google-cloud-bigquery>=3.18",
 ]
