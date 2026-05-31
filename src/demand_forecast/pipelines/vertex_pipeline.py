@@ -28,6 +28,7 @@ The compiled pipeline.yaml can be submitted to Vertex AI via:
 """
 
 from pathlib import Path
+from turtle import pd
 
 from kfp import compiler, dsl
 from kfp.dsl import Dataset, Input, Metrics, Model, Output
@@ -115,9 +116,11 @@ def preprocess_data(
     test_df = df.iloc[n_train + n_val:]
 
     # KFP manages the GCS path — just write to .path
-    train_df.to_csv(train_dataset.path, index=False)
-    val_df.to_csv(val_dataset.path, index=False)
-    test_df.to_csv(test_dataset.path, index=False)
+    import os
+    os.makedirs(os.path.dirname(train_dataset.path), exist_ok=True)
+    train_df.to_csv(train_dataset.path + ".csv", index=False)
+    val_df.to_csv(val_dataset.path + ".csv", index=False)
+    test_df.to_csv(test_dataset.path + ".csv", index=False)
 
     # Log metadata as Metrics artifact
     data_stats.log_metric("train_rows", len(train_df))
@@ -130,34 +133,25 @@ def preprocess_data(
 
 @dsl.component(
     base_image="python:3.11-slim",
-    packages_to_install=["pandas", "numpy", "scikit-learn", "xgboost", "mlflow"],
+    packages_to_install=["pandas", "numpy", "scikit-learn", "xgboost"],
 )
 def train_model(
     train_dataset: Input[Dataset],
     val_dataset: Input[Dataset],
-    mlflow_tracking_uri: str,
-    experiment_name: str,
     n_estimators: int,
     max_depth: int,
     learning_rate: float,
-    # Outputs
-    trained_model: Output[Model],   # Model artifact — KFP manages GCS path
+    trained_model: Output[Model],
     train_metrics: Output[Metrics],
 ) -> str:
-    """
-    Training component — runs in its own container with its own resources.
-    In production, specify accelerator_config for GPU training.
-    """
+    import os
     import pandas as pd
     import numpy as np
     from xgboost import XGBRegressor
     from sklearn.metrics import mean_absolute_error
-    import mlflow
-    import mlflow.xgboost
-    import pickle
 
-    train_df = pd.read_csv(train_dataset.path)
-    val_df = pd.read_csv(val_dataset.path)
+    train_df = pd.read_csv(train_dataset.path + ".csv")
+    val_df = pd.read_csv(val_dataset.path + ".csv")
 
     target = "units_sold"
     feature_cols = [c for c in train_df.columns if c != target]
@@ -165,33 +159,21 @@ def train_model(
     X_train, y_train = train_df[feature_cols], train_df[target]
     X_val, y_val = val_df[feature_cols], val_df[target]
 
-    mlflow.set_tracking_uri(mlflow_tracking_uri)
-    mlflow.set_experiment(experiment_name)
+    model = XGBRegressor(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        learning_rate=learning_rate,
+        random_state=42,
+    )
+    model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
 
-    with mlflow.start_run() as run:
-        model = XGBRegressor(
-            n_estimators=n_estimators,
-            max_depth=max_depth,
-            learning_rate=learning_rate,
-            random_state=42,
-        )
-        model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+    val_mae = mean_absolute_error(y_val, model.predict(X_val))
+    train_metrics.log_metric("val_mae", val_mae)
 
-        val_mae = mean_absolute_error(y_val, model.predict(X_val))
-        mlflow.log_metric("val_mae", val_mae)
+    os.makedirs(trained_model.path, exist_ok=True)
+    model.save_model(trained_model.path + "/model.bst")
 
-        # Log metrics to KFP artifact (visible in Vertex AI UI)
-        train_metrics.log_metric("val_mae", val_mae)
-        train_metrics.log_metric("run_id", run.info.run_id)
-
-        # Save model to KFP-managed GCS path
-        import os
-        os.makedirs(trained_model.path, exist_ok=True)
-        model.save_model(f"{trained_model.path}/model.xgb")
-        with open(f"{trained_model.path}/feature_names.txt", "w") as f:
-            f.write("\n".join(feature_cols))
-
-        return run.info.run_id
+    return f"val_mae={val_mae:.4f}"
 
 
 @dsl.component(
@@ -216,12 +198,12 @@ def evaluate_model(
     from xgboost import XGBRegressor
     from sklearn.metrics import mean_absolute_error, r2_score
 
-    test_df = pd.read_csv(test_dataset.path)
+    test_df = pd.read_csv(test_dataset.path + ".csv")
     target = "units_sold"
     feature_cols = [c for c in test_df.columns if c != target]
 
     model = XGBRegressor()
-    model.load_model(f"{trained_model.path}/model.xgb")
+    model.load_model(f"{trained_model.path}/model.bst")
 
     preds = model.predict(test_df[feature_cols])
     test_mae = mean_absolute_error(test_df[target], preds)
@@ -250,38 +232,33 @@ def deploy_model(
     machine_type: str,
     canary_traffic_percent: int,
 ) -> str:
-    """
-    Deploy the model to a Vertex AI Endpoint with canary rollout.
-
-    MLOPS INSIGHT: Canary deployment routes a small % of traffic to the new model.
-    If metrics look good after 24h bake time, expand to 100%.
-    This is the safety mechanism between training and full production.
-    """
     from google.cloud import aiplatform
+    import os
 
     aiplatform.init(project=project, location=region)
 
-    # Upload model to Vertex AI Model Registry
+    # upload model using GCS uri directly
+    model_uri = trained_model.uri.replace("/model", "")
+
     model = aiplatform.Model.upload(
         display_name="demand-forecast-model",
-        artifact_uri=trained_model.path,
+        artifact_uri=trained_model.uri,
         serving_container_image_uri="us-docker.pkg.dev/vertex-ai/prediction/xgboost-cpu.1-7:latest",
+        staging_bucket=f"gs://demand-forecast-sj",
     )
 
-    # Get or create endpoint
-    endpoints = aiplatform.Endpoint.list(filter=f'display_name="{endpoint_name}"')
-    if endpoints:
-        endpoint = endpoints[0]
-    else:
-        endpoint = aiplatform.Endpoint.create(display_name=endpoint_name)
+    endpoint = aiplatform.Endpoint.create(
+        display_name=endpoint_name,
+        project=project,
+        location=region,
+    )
 
-    # Deploy with canary traffic split
     model.deploy(
-        endpoint=endpoint,
-        machine_type=machine_type,
-        min_replica_count=1,
-        max_replica_count=5,
-        traffic_percentage=canary_traffic_percent,   # e.g. 10% to new model
+    endpoint=endpoint,
+    machine_type=machine_type,
+    min_replica_count=1,
+    max_replica_count=1,
+    traffic_percentage=100,   # first deployment always 100%
     )
 
     return endpoint.resource_name
@@ -326,8 +303,6 @@ def demand_forecast_pipeline(
     train_task = train_model(
         train_dataset=preprocess_task.outputs["train_dataset"],
         val_dataset=preprocess_task.outputs["val_dataset"],
-        mlflow_tracking_uri=mlflow_tracking_uri,
-        experiment_name=experiment_name,
         n_estimators=n_estimators,
         max_depth=max_depth,
         learning_rate=learning_rate,

@@ -16,8 +16,6 @@ job = aiplatform.PipelineJob(
         "gcs_bucket": BUCKET,
         "project": PROJECT_ID,
         "region": REGION,
-        "experiment_name": "demand-forecast-prod",
-        "mlflow_tracking_uri": f"gs://{BUCKET}/mlruns",
         "n_estimators": 200,
         "max_depth": 5,
         "learning_rate": 0.05,

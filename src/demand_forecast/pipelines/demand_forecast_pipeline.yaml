@@ -153,14 +153,10 @@ components:
             schemaTitle: system.Dataset
             schemaVersion: 0.0.1
       parameters:
-        experiment_name:
-          parameterType: STRING
         learning_rate:
           parameterType: NUMBER_DOUBLE
         max_depth:
           parameterType: NUMBER_INTEGER
-        mlflow_tracking_uri:
-          parameterType: STRING
         n_estimators:
           parameterType: NUMBER_INTEGER
     outputDefinitions:
@@ -207,24 +203,18 @@ deploymentSpec:
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
           \ *\n\ndef deploy_model(\n    trained_model: Input[Model],\n    project:\
           \ str,\n    region: str,\n    endpoint_name: str,\n    machine_type: str,\n\
-          \    canary_traffic_percent: int,\n) -> str:\n    \"\"\"\n    Deploy the\
-          \ model to a Vertex AI Endpoint with canary rollout.\n\n    MLOPS INSIGHT:\
-          \ Canary deployment routes a small % of traffic to the new model.\n    If\
-          \ metrics look good after 24h bake time, expand to 100%.\n    This is the\
-          \ safety mechanism between training and full production.\n    \"\"\"\n \
-          \   from google.cloud import aiplatform\n\n    aiplatform.init(project=project,\
-          \ location=region)\n\n    # Upload model to Vertex AI Model Registry\n \
-          \   model = aiplatform.Model.upload(\n        display_name=\"demand-forecast-model\"\
-          ,\n        artifact_uri=trained_model.path,\n        serving_container_image_uri=\"\
-          us-docker.pkg.dev/vertex-ai/prediction/xgboost-cpu.1-7:latest\",\n    )\n\
-          \n    # Get or create endpoint\n    endpoints = aiplatform.Endpoint.list(filter=f'display_name=\"\
-          {endpoint_name}\"')\n    if endpoints:\n        endpoint = endpoints[0]\n\
-          \    else:\n        endpoint = aiplatform.Endpoint.create(display_name=endpoint_name)\n\
-          \n    # Deploy with canary traffic split\n    model.deploy(\n        endpoint=endpoint,\n\
-          \        machine_type=machine_type,\n        min_replica_count=1,\n    \
-          \    max_replica_count=5,\n        traffic_percentage=canary_traffic_percent,\
-          \   # e.g. 10% to new model\n    )\n\n    return endpoint.resource_name\n\
-          \n"
+          \    canary_traffic_percent: int,\n) -> str:\n    from google.cloud import\
+          \ aiplatform\n    import os\n\n    aiplatform.init(project=project, location=region)\n\
+          \n    # upload model using GCS uri directly\n    model_uri = trained_model.uri.replace(\"\
+          /model\", \"\")\n\n    model = aiplatform.Model.upload(\n        display_name=\"\
+          demand-forecast-model\",\n        artifact_uri=trained_model.uri,\n    \
+          \    serving_container_image_uri=\"us-docker.pkg.dev/vertex-ai/prediction/xgboost-cpu.1-7:latest\"\
+          ,\n        staging_bucket=f\"gs://demand-forecast-sj\",\n    )\n\n    endpoint\
+          \ = aiplatform.Endpoint.create(\n        display_name=endpoint_name,\n \
+          \       project=project,\n        location=region,\n    )\n\n    model.deploy(\n\
+          \    endpoint=endpoint,\n    machine_type=machine_type,\n    min_replica_count=1,\n\
+          \    max_replica_count=1,\n    traffic_percentage=100,   # first deployment\
+          \ always 100%\n    )\n\n    return endpoint.resource_name\n\n"
         image: python:3.11-slim
     exec-evaluate-model:
       container:
@@ -261,9 +251,9 @@ deploymentSpec:
           \ branching, just like\n    BranchPythonOperator in Airflow.\n    \"\"\"\
           \n    import pandas as pd\n    import numpy as np\n    from xgboost import\
           \ XGBRegressor\n    from sklearn.metrics import mean_absolute_error, r2_score\n\
-          \n    test_df = pd.read_csv(test_dataset.path)\n    target = \"units_sold\"\
-          \n    feature_cols = [c for c in test_df.columns if c != target]\n\n   \
-          \ model = XGBRegressor()\n    model.load_model(f\"{trained_model.path}/model.xgb\"\
+          \n    test_df = pd.read_csv(test_dataset.path + \".csv\")\n    target =\
+          \ \"units_sold\"\n    feature_cols = [c for c in test_df.columns if c !=\
+          \ target]\n\n    model = XGBRegressor()\n    model.load_model(f\"{trained_model.path}/model.bst\"\
           )\n\n    preds = model.predict(test_df[feature_cols])\n    test_mae = mean_absolute_error(test_df[target],\
           \ preds)\n    test_r2 = r2_score(test_df[target], preds)\n\n    eval_metrics.log_metric(\"\
           test_mae\", test_mae)\n    eval_metrics.log_metric(\"test_r2\", test_r2)\n\
@@ -336,13 +326,14 @@ deploymentSpec:
           \ feature_cols = [c for c in df.columns if c != \"units_sold\"]\n    target\
           \ = \"units_sold\"\n\n    train_df = df.iloc[:n_train]\n    val_df = df.iloc[n_train:n_train\
           \ + n_val]\n    test_df = df.iloc[n_train + n_val:]\n\n    # KFP manages\
-          \ the GCS path \u2014 just write to .path\n    train_df.to_csv(train_dataset.path,\
-          \ index=False)\n    val_df.to_csv(val_dataset.path, index=False)\n    test_df.to_csv(test_dataset.path,\
-          \ index=False)\n\n    # Log metadata as Metrics artifact\n    data_stats.log_metric(\"\
-          train_rows\", len(train_df))\n    data_stats.log_metric(\"val_rows\", len(val_df))\n\
-          \    data_stats.log_metric(\"test_rows\", len(test_df))\n    data_stats.log_metric(\"\
-          n_features\", len(feature_cols))\n\n    return f\"Preprocessed {n_rows}\
-          \ rows, {len(feature_cols)} features\"\n\n"
+          \ the GCS path \u2014 just write to .path\n    import os\n    os.makedirs(os.path.dirname(train_dataset.path),\
+          \ exist_ok=True)\n    train_df.to_csv(train_dataset.path + \".csv\", index=False)\n\
+          \    val_df.to_csv(val_dataset.path + \".csv\", index=False)\n    test_df.to_csv(test_dataset.path\
+          \ + \".csv\", index=False)\n\n    # Log metadata as Metrics artifact\n \
+          \   data_stats.log_metric(\"train_rows\", len(train_df))\n    data_stats.log_metric(\"\
+          val_rows\", len(val_df))\n    data_stats.log_metric(\"test_rows\", len(test_df))\n\
+          \    data_stats.log_metric(\"n_features\", len(feature_cols))\n\n    return\
+          \ f\"Preprocessed {n_rows} rows, {len(feature_cols)} features\"\n\n"
         image: python:3.11-slim
     exec-train-model:
       container:
@@ -357,9 +348,9 @@ deploymentSpec:
         - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
           \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
           \ python3 -m pip install --quiet --no-warn-script-location 'pandas' 'numpy'\
-          \ 'scikit-learn' 'xgboost' 'mlflow'  &&  python3 -m pip install --quiet\
-          \ --no-warn-script-location 'kfp==2.16.1' '--no-deps' 'typing-extensions>=3.7.4,<5;\
-          \ python_version<\"3.9\"' && \"$0\" \"$@\"\n"
+          \ 'scikit-learn' 'xgboost'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.16.1' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
         - sh
         - -ec
         - 'program_path=$(mktemp -d)
@@ -372,34 +363,22 @@ deploymentSpec:
           '
         - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
           \ *\n\ndef train_model(\n    train_dataset: Input[Dataset],\n    val_dataset:\
-          \ Input[Dataset],\n    mlflow_tracking_uri: str,\n    experiment_name: str,\n\
-          \    n_estimators: int,\n    max_depth: int,\n    learning_rate: float,\n\
-          \    # Outputs\n    trained_model: Output[Model],   # Model artifact \u2014\
-          \ KFP manages GCS path\n    train_metrics: Output[Metrics],\n) -> str:\n\
-          \    \"\"\"\n    Training component \u2014 runs in its own container with\
-          \ its own resources.\n    In production, specify accelerator_config for\
-          \ GPU training.\n    \"\"\"\n    import pandas as pd\n    import numpy as\
-          \ np\n    from xgboost import XGBRegressor\n    from sklearn.metrics import\
-          \ mean_absolute_error\n    import mlflow\n    import mlflow.xgboost\n  \
-          \  import pickle\n\n    train_df = pd.read_csv(train_dataset.path)\n   \
-          \ val_df = pd.read_csv(val_dataset.path)\n\n    target = \"units_sold\"\n\
-          \    feature_cols = [c for c in train_df.columns if c != target]\n\n   \
-          \ X_train, y_train = train_df[feature_cols], train_df[target]\n    X_val,\
-          \ y_val = val_df[feature_cols], val_df[target]\n\n    mlflow.set_tracking_uri(mlflow_tracking_uri)\n\
-          \    mlflow.set_experiment(experiment_name)\n\n    with mlflow.start_run()\
-          \ as run:\n        model = XGBRegressor(\n            n_estimators=n_estimators,\n\
-          \            max_depth=max_depth,\n            learning_rate=learning_rate,\n\
-          \            random_state=42,\n        )\n        model.fit(X_train, y_train,\
-          \ eval_set=[(X_val, y_val)], verbose=False)\n\n        val_mae = mean_absolute_error(y_val,\
-          \ model.predict(X_val))\n        mlflow.log_metric(\"val_mae\", val_mae)\n\
-          \n        # Log metrics to KFP artifact (visible in Vertex AI UI)\n    \
-          \    train_metrics.log_metric(\"val_mae\", val_mae)\n        train_metrics.log_metric(\"\
-          run_id\", run.info.run_id)\n\n        # Save model to KFP-managed GCS path\n\
-          \        import os\n        os.makedirs(trained_model.path, exist_ok=True)\n\
-          \        model.save_model(f\"{trained_model.path}/model.xgb\")\n       \
-          \ with open(f\"{trained_model.path}/feature_names.txt\", \"w\") as f:\n\
-          \            f.write(\"\\n\".join(feature_cols))\n\n        return run.info.run_id\n\
-          \n"
+          \ Input[Dataset],\n    n_estimators: int,\n    max_depth: int,\n    learning_rate:\
+          \ float,\n    trained_model: Output[Model],\n    train_metrics: Output[Metrics],\n\
+          ) -> str:\n    import os\n    import pandas as pd\n    import numpy as np\n\
+          \    from xgboost import XGBRegressor\n    from sklearn.metrics import mean_absolute_error\n\
+          \n    train_df = pd.read_csv(train_dataset.path + \".csv\")\n    val_df\
+          \ = pd.read_csv(val_dataset.path + \".csv\")\n\n    target = \"units_sold\"\
+          \n    feature_cols = [c for c in train_df.columns if c != target]\n\n  \
+          \  X_train, y_train = train_df[feature_cols], train_df[target]\n    X_val,\
+          \ y_val = val_df[feature_cols], val_df[target]\n\n    model = XGBRegressor(\n\
+          \        n_estimators=n_estimators,\n        max_depth=max_depth,\n    \
+          \    learning_rate=learning_rate,\n        random_state=42,\n    )\n   \
+          \ model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)\n\
+          \n    val_mae = mean_absolute_error(y_val, model.predict(X_val))\n    train_metrics.log_metric(\"\
+          val_mae\", val_mae)\n\n    os.makedirs(trained_model.path, exist_ok=True)\n\
+          \    model.save_model(trained_model.path + \"/model.bst\")\n\n    return\
+          \ f\"val_mae={val_mae:.4f}\"\n\n"
         image: python:3.11-slim
         resources:
           cpuLimit: 4.0
@@ -514,14 +493,10 @@ root:
                 outputArtifactKey: val_dataset
                 producerTask: preprocess-data
           parameters:
-            experiment_name:
-              componentInputParameter: experiment_name
             learning_rate:
               componentInputParameter: learning_rate
             max_depth:
               componentInputParameter: max_depth
-            mlflow_tracking_uri:
-              componentInputParameter: mlflow_tracking_uri
             n_estimators:
               componentInputParameter: n_estimators
         taskInfo:
