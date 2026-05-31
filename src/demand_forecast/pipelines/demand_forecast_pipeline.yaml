@@ -1,0 +1,576 @@
+# PIPELINE DEFINITION
+# Name: demand-forecast-training-pipeline
+# Description: End-to-end MLOps pipeline: preprocess to train to evaluate to deploy
+# Inputs:
+#    canary_traffic_percent: int [Default: 10.0]
+#    data_path: str [Default: 'data/raw/sales.csv']
+#    experiment_name: str [Default: 'demand-forecast-prod']
+#    gcs_bucket: str [Default: 'my-mlops-bucket']
+#    learning_rate: float [Default: 0.05]
+#    max_depth: int [Default: 6.0]
+#    mlflow_tracking_uri: str [Default: 'https://mlflow.internal']
+#    n_estimators: int [Default: 300.0]
+#    project: str [Default: 'my-gcp-project']
+#    promotion_threshold: float [Default: 0.05]
+#    region: str [Default: 'us-central1']
+components:
+  comp-condition-1:
+    dag:
+      tasks:
+        deploy-model:
+          cachingOptions:
+            enableCache: true
+          componentRef:
+            name: comp-deploy-model
+          inputs:
+            artifacts:
+              trained_model:
+                componentInputArtifact: pipelinechannel--train-model-trained_model
+            parameters:
+              canary_traffic_percent:
+                componentInputParameter: pipelinechannel--canary_traffic_percent
+              endpoint_name:
+                runtimeValue:
+                  constant: demand-forecast-endpoint
+              machine_type:
+                runtimeValue:
+                  constant: n1-standard-2
+              project:
+                componentInputParameter: pipelinechannel--project
+              region:
+                componentInputParameter: pipelinechannel--region
+          taskInfo:
+            name: deploy-model
+    inputDefinitions:
+      artifacts:
+        pipelinechannel--train-model-trained_model:
+          artifactType:
+            schemaTitle: system.Model
+            schemaVersion: 0.0.1
+      parameters:
+        pipelinechannel--canary_traffic_percent:
+          parameterType: NUMBER_INTEGER
+        pipelinechannel--evaluate-model-Output:
+          parameterType: STRING
+        pipelinechannel--project:
+          parameterType: STRING
+        pipelinechannel--region:
+          parameterType: STRING
+  comp-deploy-model:
+    executorLabel: exec-deploy-model
+    inputDefinitions:
+      artifacts:
+        trained_model:
+          artifactType:
+            schemaTitle: system.Model
+            schemaVersion: 0.0.1
+      parameters:
+        canary_traffic_percent:
+          parameterType: NUMBER_INTEGER
+        endpoint_name:
+          parameterType: STRING
+        machine_type:
+          parameterType: STRING
+        project:
+          parameterType: STRING
+        region:
+          parameterType: STRING
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-evaluate-model:
+    executorLabel: exec-evaluate-model
+    inputDefinitions:
+      artifacts:
+        test_dataset:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+        trained_model:
+          artifactType:
+            schemaTitle: system.Model
+            schemaVersion: 0.0.1
+      parameters:
+        promotion_threshold:
+          parameterType: NUMBER_DOUBLE
+    outputDefinitions:
+      artifacts:
+        eval_metrics:
+          artifactType:
+            schemaTitle: system.Metrics
+            schemaVersion: 0.0.1
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-preprocess-data:
+    executorLabel: exec-preprocess-data
+    inputDefinitions:
+      parameters:
+        data_path:
+          parameterType: STRING
+        gcs_bucket:
+          parameterType: STRING
+        lag_windows:
+          parameterType: LIST
+        rolling_windows:
+          parameterType: LIST
+        test_weeks:
+          parameterType: NUMBER_INTEGER
+        validation_weeks:
+          parameterType: NUMBER_INTEGER
+    outputDefinitions:
+      artifacts:
+        data_stats:
+          artifactType:
+            schemaTitle: system.Metrics
+            schemaVersion: 0.0.1
+        test_dataset:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+        train_dataset:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+        val_dataset:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-train-model:
+    executorLabel: exec-train-model
+    inputDefinitions:
+      artifacts:
+        train_dataset:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+        val_dataset:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+      parameters:
+        experiment_name:
+          parameterType: STRING
+        learning_rate:
+          parameterType: NUMBER_DOUBLE
+        max_depth:
+          parameterType: NUMBER_INTEGER
+        mlflow_tracking_uri:
+          parameterType: STRING
+        n_estimators:
+          parameterType: NUMBER_INTEGER
+    outputDefinitions:
+      artifacts:
+        train_metrics:
+          artifactType:
+            schemaTitle: system.Metrics
+            schemaVersion: 0.0.1
+        trained_model:
+          artifactType:
+            schemaTitle: system.Model
+            schemaVersion: 0.0.1
+      parameters:
+        Output:
+          parameterType: STRING
+deploymentSpec:
+  executors:
+    exec-deploy-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - deploy_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'google-cloud-aiplatform'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.16.1'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef deploy_model(\n    trained_model: Input[Model],\n    project:\
+          \ str,\n    region: str,\n    endpoint_name: str,\n    machine_type: str,\n\
+          \    canary_traffic_percent: int,\n) -> str:\n    \"\"\"\n    Deploy the\
+          \ model to a Vertex AI Endpoint with canary rollout.\n\n    MLOPS INSIGHT:\
+          \ Canary deployment routes a small % of traffic to the new model.\n    If\
+          \ metrics look good after 24h bake time, expand to 100%.\n    This is the\
+          \ safety mechanism between training and full production.\n    \"\"\"\n \
+          \   from google.cloud import aiplatform\n\n    aiplatform.init(project=project,\
+          \ location=region)\n\n    # Upload model to Vertex AI Model Registry\n \
+          \   model = aiplatform.Model.upload(\n        display_name=\"demand-forecast-model\"\
+          ,\n        artifact_uri=trained_model.path,\n        serving_container_image_uri=\"\
+          us-docker.pkg.dev/vertex-ai/prediction/xgboost-cpu.1-7:latest\",\n    )\n\
+          \n    # Get or create endpoint\n    endpoints = aiplatform.Endpoint.list(filter=f'display_name=\"\
+          {endpoint_name}\"')\n    if endpoints:\n        endpoint = endpoints[0]\n\
+          \    else:\n        endpoint = aiplatform.Endpoint.create(display_name=endpoint_name)\n\
+          \n    # Deploy with canary traffic split\n    model.deploy(\n        endpoint=endpoint,\n\
+          \        machine_type=machine_type,\n        min_replica_count=1,\n    \
+          \    max_replica_count=5,\n        traffic_percentage=canary_traffic_percent,\
+          \   # e.g. 10% to new model\n    )\n\n    return endpoint.resource_name\n\
+          \n"
+        image: python:3.11-slim
+    exec-evaluate-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - evaluate_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'pandas' 'numpy'\
+          \ 'scikit-learn' 'xgboost'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.16.1' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef evaluate_model(\n    trained_model: Input[Model],\n    test_dataset:\
+          \ Input[Dataset],\n    promotion_threshold: float,\n    eval_metrics: Output[Metrics],\n\
+          ) -> str:\n    \"\"\"\n    Evaluate component \u2014 runs tests and decides\
+          \ on promotion.\n\n    KFP INSIGHT: The return value of a component can\
+          \ be used as a condition\n    in the pipeline (dsl.Condition) to implement\
+          \ branching, just like\n    BranchPythonOperator in Airflow.\n    \"\"\"\
+          \n    import pandas as pd\n    import numpy as np\n    from xgboost import\
+          \ XGBRegressor\n    from sklearn.metrics import mean_absolute_error, r2_score\n\
+          \n    test_df = pd.read_csv(test_dataset.path)\n    target = \"units_sold\"\
+          \n    feature_cols = [c for c in test_df.columns if c != target]\n\n   \
+          \ model = XGBRegressor()\n    model.load_model(f\"{trained_model.path}/model.xgb\"\
+          )\n\n    preds = model.predict(test_df[feature_cols])\n    test_mae = mean_absolute_error(test_df[target],\
+          \ preds)\n    test_r2 = r2_score(test_df[target], preds)\n\n    eval_metrics.log_metric(\"\
+          test_mae\", test_mae)\n    eval_metrics.log_metric(\"test_r2\", test_r2)\n\
+          \n    # Promotion decision: MAE under threshold\n    should_promote = test_mae\
+          \ < 500   # simplified threshold for demo\n    eval_metrics.log_metric(\"\
+          should_promote\", int(should_promote))\n\n    print(f\"test_mae={test_mae:.2f}\
+          \ | test_r2={test_r2:.3f} | promote={should_promote}\")\n    return \"true\"\
+          \ if should_promote else \"false\"\n\n"
+        image: python:3.11-slim
+    exec-preprocess-data:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - preprocess_data
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'pandas' 'numpy'\
+          \ 'scikit-learn' 'xgboost' 'google-cloud-storage'  &&  python3 -m pip install\
+          \ --quiet --no-warn-script-location 'kfp==2.16.1' '--no-deps' 'typing-extensions>=3.7.4,<5;\
+          \ python_version<\"3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef preprocess_data(\n    # Input parameters\n    gcs_bucket: str,\n\
+          \    data_path: str,\n    lag_windows: list,\n    rolling_windows: list,\n\
+          \    test_weeks: int,\n    validation_weeks: int,\n    # Output artifacts\
+          \ \u2014 KFP manages the GCS paths for these automatically\n    train_dataset:\
+          \ Output[Dataset],   # Output[Dataset] = a GCS-backed file\n    val_dataset:\
+          \ Output[Dataset],\n    test_dataset: Output[Dataset],\n    data_stats:\
+          \ Output[Metrics],      # Output[Metrics] = logged metadata\n) -> str:\n\
+          \    \"\"\"\n    Preprocessing component \u2014 runs in its own container.\n\
+          \n    MLOPS INSIGHT: KFP components are pure functions with typed inputs/outputs.\n\
+          \    KFP handles:\n    - Spinning up the container\n    - Passing input\
+          \ values\n    - Creating GCS paths for output artifacts\n    - Caching:\
+          \ if inputs haven't changed, skip this step and reuse cached output\n  \
+          \  \"\"\"\n    import json\n    import sys\n    sys.path.insert(0, \"/src\"\
+          )   # your installed package path\n\n    # Simulate preprocessing (in production:\
+          \ loads from gcs_bucket/data_path)\n    import numpy as np\n    import pandas\
+          \ as pd\n\n    # In real pipeline: df = pd.read_csv(f\"gs://{gcs_bucket}/{data_path}\"\
+          )\n    # For now: generate synthetic data\n    rng = np.random.default_rng(42)\n\
+          \    n_rows = 1000\n    df = pd.DataFrame({\n        \"price\": rng.uniform(2.5,\
+          \ 15.0, n_rows),\n        \"promotion_flag\": rng.integers(0, 2, n_rows),\n\
+          \        \"store_count\": rng.integers(50, 500, n_rows),\n        \"lag_1w\"\
+          : rng.lognormal(6, 0.5, n_rows),\n        \"lag_2w\": rng.lognormal(6, 0.5,\
+          \ n_rows),\n        \"lag_4w\": rng.lognormal(6, 0.5, n_rows),\n       \
+          \ \"lag_8w\": rng.lognormal(6, 0.5, n_rows),\n        \"lag_12w\": rng.lognormal(6,\
+          \ 0.5, n_rows),\n        \"rolling_mean_4w\": rng.lognormal(6, 0.3, n_rows),\n\
+          \        \"rolling_mean_8w\": rng.lognormal(6, 0.3, n_rows),\n        \"\
+          rolling_mean_13w\": rng.lognormal(6, 0.3, n_rows),\n        \"rolling_std_4w\"\
+          : rng.lognormal(4, 0.5, n_rows),\n        \"week_of_year\": rng.integers(1,\
+          \ 53, n_rows),\n        \"month\": rng.integers(1, 13, n_rows),\n      \
+          \  \"quarter\": rng.integers(1, 5, n_rows),\n        \"year\": rng.integers(2021,\
+          \ 2024, n_rows),\n        \"week_sin\": np.sin(rng.uniform(0, 2*np.pi, n_rows)),\n\
+          \        \"week_cos\": np.cos(rng.uniform(0, 2*np.pi, n_rows)),\n      \
+          \  \"units_sold\": rng.lognormal(6, 0.8, n_rows),\n    })\n\n    # Split\n\
+          \    n_train = int(n_rows * 0.7)\n    n_val = int(n_rows * 0.15)\n\n   \
+          \ feature_cols = [c for c in df.columns if c != \"units_sold\"]\n    target\
+          \ = \"units_sold\"\n\n    train_df = df.iloc[:n_train]\n    val_df = df.iloc[n_train:n_train\
+          \ + n_val]\n    test_df = df.iloc[n_train + n_val:]\n\n    # KFP manages\
+          \ the GCS path \u2014 just write to .path\n    train_df.to_csv(train_dataset.path,\
+          \ index=False)\n    val_df.to_csv(val_dataset.path, index=False)\n    test_df.to_csv(test_dataset.path,\
+          \ index=False)\n\n    # Log metadata as Metrics artifact\n    data_stats.log_metric(\"\
+          train_rows\", len(train_df))\n    data_stats.log_metric(\"val_rows\", len(val_df))\n\
+          \    data_stats.log_metric(\"test_rows\", len(test_df))\n    data_stats.log_metric(\"\
+          n_features\", len(feature_cols))\n\n    return f\"Preprocessed {n_rows}\
+          \ rows, {len(feature_cols)} features\"\n\n"
+        image: python:3.11-slim
+    exec-train-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - train_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'pandas' 'numpy'\
+          \ 'scikit-learn' 'xgboost' 'mlflow'  &&  python3 -m pip install --quiet\
+          \ --no-warn-script-location 'kfp==2.16.1' '--no-deps' 'typing-extensions>=3.7.4,<5;\
+          \ python_version<\"3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef train_model(\n    train_dataset: Input[Dataset],\n    val_dataset:\
+          \ Input[Dataset],\n    mlflow_tracking_uri: str,\n    experiment_name: str,\n\
+          \    n_estimators: int,\n    max_depth: int,\n    learning_rate: float,\n\
+          \    # Outputs\n    trained_model: Output[Model],   # Model artifact \u2014\
+          \ KFP manages GCS path\n    train_metrics: Output[Metrics],\n) -> str:\n\
+          \    \"\"\"\n    Training component \u2014 runs in its own container with\
+          \ its own resources.\n    In production, specify accelerator_config for\
+          \ GPU training.\n    \"\"\"\n    import pandas as pd\n    import numpy as\
+          \ np\n    from xgboost import XGBRegressor\n    from sklearn.metrics import\
+          \ mean_absolute_error\n    import mlflow\n    import mlflow.xgboost\n  \
+          \  import pickle\n\n    train_df = pd.read_csv(train_dataset.path)\n   \
+          \ val_df = pd.read_csv(val_dataset.path)\n\n    target = \"units_sold\"\n\
+          \    feature_cols = [c for c in train_df.columns if c != target]\n\n   \
+          \ X_train, y_train = train_df[feature_cols], train_df[target]\n    X_val,\
+          \ y_val = val_df[feature_cols], val_df[target]\n\n    mlflow.set_tracking_uri(mlflow_tracking_uri)\n\
+          \    mlflow.set_experiment(experiment_name)\n\n    with mlflow.start_run()\
+          \ as run:\n        model = XGBRegressor(\n            n_estimators=n_estimators,\n\
+          \            max_depth=max_depth,\n            learning_rate=learning_rate,\n\
+          \            random_state=42,\n        )\n        model.fit(X_train, y_train,\
+          \ eval_set=[(X_val, y_val)], verbose=False)\n\n        val_mae = mean_absolute_error(y_val,\
+          \ model.predict(X_val))\n        mlflow.log_metric(\"val_mae\", val_mae)\n\
+          \n        # Log metrics to KFP artifact (visible in Vertex AI UI)\n    \
+          \    train_metrics.log_metric(\"val_mae\", val_mae)\n        train_metrics.log_metric(\"\
+          run_id\", run.info.run_id)\n\n        # Save model to KFP-managed GCS path\n\
+          \        import os\n        os.makedirs(trained_model.path, exist_ok=True)\n\
+          \        model.save_model(f\"{trained_model.path}/model.xgb\")\n       \
+          \ with open(f\"{trained_model.path}/feature_names.txt\", \"w\") as f:\n\
+          \            f.write(\"\\n\".join(feature_cols))\n\n        return run.info.run_id\n\
+          \n"
+        image: python:3.11-slim
+        resources:
+          cpuLimit: 4.0
+          memoryLimit: 16.0
+          resourceCpuLimit: '4'
+          resourceMemoryLimit: 16G
+pipelineInfo:
+  description: 'End-to-end MLOps pipeline: preprocess to train to evaluate to deploy'
+  name: demand-forecast-training-pipeline
+root:
+  dag:
+    tasks:
+      condition-1:
+        componentRef:
+          name: comp-condition-1
+        dependentTasks:
+        - evaluate-model
+        - train-model
+        inputs:
+          artifacts:
+            pipelinechannel--train-model-trained_model:
+              taskOutputArtifact:
+                outputArtifactKey: trained_model
+                producerTask: train-model
+          parameters:
+            pipelinechannel--canary_traffic_percent:
+              componentInputParameter: canary_traffic_percent
+            pipelinechannel--evaluate-model-Output:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: evaluate-model
+            pipelinechannel--project:
+              componentInputParameter: project
+            pipelinechannel--region:
+              componentInputParameter: region
+        taskInfo:
+          name: should-promote
+        triggerPolicy:
+          condition: inputs.parameter_values['pipelinechannel--evaluate-model-Output']
+            == 'true'
+      evaluate-model:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-evaluate-model
+        dependentTasks:
+        - preprocess-data
+        - train-model
+        inputs:
+          artifacts:
+            test_dataset:
+              taskOutputArtifact:
+                outputArtifactKey: test_dataset
+                producerTask: preprocess-data
+            trained_model:
+              taskOutputArtifact:
+                outputArtifactKey: trained_model
+                producerTask: train-model
+          parameters:
+            promotion_threshold:
+              componentInputParameter: promotion_threshold
+        taskInfo:
+          name: evaluate-model
+      preprocess-data:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-preprocess-data
+        inputs:
+          parameters:
+            data_path:
+              componentInputParameter: data_path
+            gcs_bucket:
+              componentInputParameter: gcs_bucket
+            lag_windows:
+              runtimeValue:
+                constant:
+                - 1.0
+                - 2.0
+                - 4.0
+                - 8.0
+                - 12.0
+            rolling_windows:
+              runtimeValue:
+                constant:
+                - 4.0
+                - 8.0
+                - 13.0
+            test_weeks:
+              runtimeValue:
+                constant: 13.0
+            validation_weeks:
+              runtimeValue:
+                constant: 13.0
+        taskInfo:
+          name: preprocess-data
+      train-model:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-train-model
+        dependentTasks:
+        - preprocess-data
+        inputs:
+          artifacts:
+            train_dataset:
+              taskOutputArtifact:
+                outputArtifactKey: train_dataset
+                producerTask: preprocess-data
+            val_dataset:
+              taskOutputArtifact:
+                outputArtifactKey: val_dataset
+                producerTask: preprocess-data
+          parameters:
+            experiment_name:
+              componentInputParameter: experiment_name
+            learning_rate:
+              componentInputParameter: learning_rate
+            max_depth:
+              componentInputParameter: max_depth
+            mlflow_tracking_uri:
+              componentInputParameter: mlflow_tracking_uri
+            n_estimators:
+              componentInputParameter: n_estimators
+        taskInfo:
+          name: train-model
+  inputDefinitions:
+    parameters:
+      canary_traffic_percent:
+        defaultValue: 10.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      data_path:
+        defaultValue: data/raw/sales.csv
+        isOptional: true
+        parameterType: STRING
+      experiment_name:
+        defaultValue: demand-forecast-prod
+        isOptional: true
+        parameterType: STRING
+      gcs_bucket:
+        defaultValue: my-mlops-bucket
+        isOptional: true
+        parameterType: STRING
+      learning_rate:
+        defaultValue: 0.05
+        isOptional: true
+        parameterType: NUMBER_DOUBLE
+      max_depth:
+        defaultValue: 6.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      mlflow_tracking_uri:
+        defaultValue: https://mlflow.internal
+        isOptional: true
+        parameterType: STRING
+      n_estimators:
+        defaultValue: 300.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      project:
+        defaultValue: my-gcp-project
+        isOptional: true
+        parameterType: STRING
+      promotion_threshold:
+        defaultValue: 0.05
+        isOptional: true
+        parameterType: NUMBER_DOUBLE
+      region:
+        defaultValue: us-central1
+        isOptional: true
+        parameterType: STRING
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.16.1
